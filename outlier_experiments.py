@@ -8,10 +8,10 @@ import keras
 from keras.models import Model, Sequential
 from keras.layers import Dense, Dropout
 from utils import save_roc_pr_curve_data, get_class_name_from_index, get_channels_axis
-from models.encoders_decoders import conv_encoder, conv_decoder
+from models.encoders_decoders import conv_encoder, conv_decoder, RSRAE, RSRAE_plus, RSR1Loss, RSR2Loss, L21Loss
 from outlier_datasets import load_cifar10_with_outliers, load_cifar100_with_outliers, \
     load_fashion_mnist_with_outliers, load_mnist_with_outliers, load_svhn_with_outliers
-from models import dagmm
+from models import dagmm, dsebm
 from transformations import RA, RA_IA, RA_IA_PR
 from models.encoders_decoders import CAE_pytorch
 from models.drae_loss import DRAELossAutograd
@@ -28,6 +28,11 @@ import torch.nn as nn
 import torch.optim as optim
 from misc import AverageMeter
 from eval_accuracy import simple_accuracy
+import pandas as pd
+# from models.pytorch_gan.GAN import discriminator, generator
+from models.pytorch_gan.SNGAN import Discriminator, Generator
+import torchvision.utils as tu
+import itertools
 
 parser = argparse.ArgumentParser(description='Run UOD experiments.')
 parser.add_argument('--results_dir', type=str, default='./results', help='Directory to save results.')
@@ -134,6 +139,101 @@ def get_features_pytorch(testloader, model):
         features.append(rep.data.cpu())
     features = torch.cat(features, dim=0)
     return features
+
+
+def train_rsrae_plus(trainloader, model, criterion, optimizer, epochs):
+    """Valid for both RSRAE+"""
+    model.train()
+    losses_ae = AverageMeter()
+    losses_rsr = AverageMeter()
+    losses = AverageMeter()
+    L_ae = criterion[0]
+    L_rsr1 = criterion[1]
+    L_rsr2 = criterion[2]
+    lambda1 = 0.1
+    lambda2 = 0.1
+    for epoch in range(epochs):
+        for batch_idx, (inputs, _) in enumerate(trainloader):
+            inputs = inputs.cuda()
+            rec, h, hr, AA = model(inputs)
+
+            loss_ae = L_ae(inputs, rec)
+            loss_rsr1 = L_rsr1(hr, h)
+            loss_rsr2 = L_rsr2(AA)
+            loss_rsr = lambda1 * loss_rsr1 + lambda2 * loss_rsr2
+            loss = loss_ae + loss_rsr
+            try:
+                losses_ae.update(loss_ae.item(), inputs.size(0))
+                losses_rsr.update(loss_rsr.item(), inputs.size(0))
+                losses.update(loss.item(), inputs.size(0))
+            except:
+                pass
+
+            # compute gradient and do SGD step
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            if (batch_idx+1) % 10 == 0:
+                print('Epoch: [{} | {}], batch: {}, loss_ae: {}, loss_rsr: {}, loss: {}'.format(epoch + 1, epochs, batch_idx + 1, losses_ae.avg, losses_rsr.avg, losses.avg))
+
+
+def train_rsrae(trainloader, model, criterion, optimizer, epochs):
+    """Valid for RSRAE"""
+    model.train()
+    losses_ae = AverageMeter()
+    losses_rsr1 = AverageMeter()
+    losses_rsr2 = AverageMeter()
+    L_ae = criterion[0]
+    L_rsr1 = criterion[1]
+    L_rsr2 = criterion[2]
+    for epoch in range(epochs):
+        for batch_idx, (inputs, _) in enumerate(trainloader):
+            inputs = inputs.cuda()
+            rec, hh, hr, AA = model(inputs)
+
+            # update by AE loss
+            loss_ae = L_ae(inputs, rec)
+            try:
+                losses_ae.update(loss_ae.item(), inputs.size(0))
+            except:
+                pass
+            optimizer.zero_grad()
+            loss_ae.backward()
+            optimizer.step()
+
+            # update by RSR loss 1
+            loss_rsr1 = L_rsr1(hr, hh)
+            try:
+                losses_rsr1.update(loss_rsr1.item(), inputs.size(0))
+            except:
+                pass
+            optimizer.zero_grad()
+            loss_rsr1.backward()
+            optimizer.step()
+
+            # update by RSR loss 2
+            loss_rsr2 = L_rsr2(AA)
+            try:
+                losses_rsr2.update(loss_rsr2.item(), inputs.size(0))
+            except:
+                pass
+            optimizer.zero_grad()
+            loss_rsr2.backward()
+            optimizer.step()
+
+            if (batch_idx+1) % 10 == 0:
+                print('Epoch: [{} | {}], batch: {}, loss_ae: {}, loss_rsr1: {}, loss_rsr2: {}'.format(epoch + 1, epochs, batch_idx + 1, losses_ae.avg, losses_rsr1.avg, losses_rsr2.avg))
+
+
+def prior_generator(batch_size, zdim, rand_type='rand'):
+    """Generate prior distribution for G."""
+    if rand_type == 'rand':
+        return torch.rand(batch_size, zdim).mul(2).sub(1)  # [-1,1]
+    elif rand_type == 'randn':
+        return torch.randn(batch_size, zdim)
+    else:
+        raise KeyError('Unknown rand type: {}'.format(rand_type))
 
 
 def softmax(input_tensor):
@@ -484,6 +584,277 @@ def _dagmm_experiment(x_train, y_train, dataset_name, single_class_ind, gpu_q, p
 
     gpu_q.put(gpu_to_use)
 
+# ######################### newly added methods ############################
+
+def _rsrae_plus_experiment(x_train, y_train, dataset_name, single_class_ind, gpu_q, p):
+    gpu_to_use = gpu_q.get()
+
+    n_channels = x_train.shape[get_channels_axis()]
+    model = RSRAE_plus(in_channels=n_channels)
+    batch_size = 128
+
+    model = model.cuda()
+    trainset = trainset_pytorch(train_data=x_train, train_labels=y_train, transform=transform_train)
+    trainloader = data.DataLoader(trainset, batch_size=batch_size, shuffle=True)
+    cudnn.benchmark = True
+    ae_criterion = L21Loss().cuda()
+    rsr1_criterion = RSR1Loss().cuda()
+    rsr2_criteriom = RSR2Loss().cuda()
+    # use adam always
+    optimizer = optim.Adam(model.parameters(), lr=0.00025, eps=1e-7, weight_decay=0.0005)
+    epochs = 250
+
+    # #########################Training########################
+    train_rsrae_plus(trainloader, model, [ae_criterion, rsr1_criterion, rsr2_criteriom], optimizer, epochs)
+
+    # #######################Testin############################
+    testloader = data.DataLoader(trainset, batch_size=1024, shuffle=False)
+    losses, reps = test_cae_pytorch(testloader, model)
+    losses = losses - losses.min()
+    losses = losses / (1e-8+losses.max())
+    scores = 1 - losses
+
+    res_file_name = '{}_rsrae_plus-outlier-{}_final_{}_{}.npz'.format(dataset_name, p,
+                                                               get_class_name_from_index(single_class_ind, dataset_name),
+                                                               datetime.now().strftime('%Y-%m-%d-%H%M'))
+    res_file_path = os.path.join(RESULTS_DIR, dataset_name, res_file_name)
+    os.makedirs(os.path.join(RESULTS_DIR, dataset_name), exist_ok=True)
+    save_roc_pr_curve_data(scores, y_train, res_file_path)
+
+    gpu_q.put(gpu_to_use)
+
+
+def _rsrae_experiment(x_train, y_train, dataset_name, single_class_ind, gpu_q, p):
+    gpu_to_use = gpu_q.get()
+
+    n_channels = x_train.shape[get_channels_axis()]
+    model = RSRAE(in_channels=n_channels)
+    batch_size = 128
+
+    model = model.cuda()
+    trainset = trainset_pytorch(train_data=x_train, train_labels=y_train, transform=transform_train)
+    trainloader = data.DataLoader(trainset, batch_size=batch_size, shuffle=True)
+    cudnn.benchmark = True
+    ae_criterion = L21Loss().cuda()
+    rsr1_criterion = RSR1Loss().cuda()
+    rsr2_criteriom = RSR2Loss().cuda()
+    # use adam always
+    optimizer = optim.Adam(model.parameters(), lr=0.00025, eps=1e-7, weight_decay=0.0005)
+    epochs = 250
+
+    # #########################Training########################
+    train_rsrae(trainloader, model, [ae_criterion, rsr1_criterion, rsr2_criteriom], optimizer, epochs)
+
+    # #######################Testin############################
+    testloader = data.DataLoader(trainset, batch_size=1024, shuffle=False)
+    losses, reps = test_cae_pytorch(testloader, model)
+    losses = losses - losses.min()
+    losses = losses / (1e-8+losses.max())
+    scores = 1 - losses
+
+    res_file_name = '{}_rsrae-outlier-{}_final_{}_{}.npz'.format(dataset_name, p,
+                                                               get_class_name_from_index(single_class_ind, dataset_name),
+                                                               datetime.now().strftime('%Y-%m-%d-%H%M'))
+    res_file_path = os.path.join(RESULTS_DIR, dataset_name, res_file_name)
+    os.makedirs(os.path.join(RESULTS_DIR, dataset_name), exist_ok=True)
+    save_roc_pr_curve_data(scores, y_train, res_file_path)
+
+    gpu_q.put(gpu_to_use)
+
+
+def _mo_gaal_experiment(x_train, y_train, dataset_name, single_class_ind, gpu_q, p):
+    gpu_to_use = gpu_q.get()
+
+    try:
+        # from tensorboardX import SummaryWriter
+        from torch.utils.tensorboard import SummaryWriter
+        writer = SummaryWriter(log_dir=os.path.join(RESULTS_DIR, dataset_name, 'tensorboard-{}'.format(
+            get_class_name_from_index(single_class_ind, dataset_name),
+        )))
+    except ImportError:
+        writer = None
+    n_channels = x_train.shape[get_channels_axis()]
+    input_size = x_train.shape[2]
+    trainset = trainset_pytorch(train_data=x_train, train_labels=y_train, transform=transform_train)
+
+    # setup GAN
+    no_G = 5  # Number of generator
+    zdim = 128
+    batch_size = 64
+    joint_epochs = 100  # Train D and Gs jointly.
+    D_epochs = joint_epochs * 3  # Train D only. Refer to the MO-GAAL paper.
+    sample_z_ = prior_generator(batch_size, zdim).cuda()  # for visualization
+    y_real_ = torch.ones(batch_size, 1, requires_grad=False).cuda()
+    y_fake_ = torch.zeros(batch_size, 1, requires_grad=False).cuda()
+    D = Discriminator(n_channels).cuda()
+    Gs = [Generator(zdim, n_channels).cuda() for _ in range(no_G)]
+    # D = discriminator(input_dim=n_channels, output_dim=1, input_size=input_size).cuda()
+    # Gs = [generator(input_dim=zdim, output_dim=n_channels, input_size=input_size).cuda() for _ in range(no_G)]
+    D_optimizer = optim.Adam(filter(lambda p: p.requires_grad, D.parameters()), lr=0.0002, betas=(0., 0.9))
+    Gs_optimizer = optim.Adam(itertools.chain(*[G.parameters() for G in Gs]), lr=0.0002, betas=(0., 0.9))
+    D_scheduler = optim.lr_scheduler.ExponentialLR(D_optimizer, gamma=0.99)
+    Gs_scheduler = optim.lr_scheduler.ExponentialLR(Gs_optimizer, gamma=0.99)
+    print(f'Using {no_G} generators, G iter: {joint_epochs}, D iter: {D_epochs}.')
+
+    def _generate(z):
+        """Generate images using Gs.
+        Note that more outliers need to be generated from ``less concentrated subset'', i.e.
+        low score ones.
+        """
+        k = len(Gs)
+        total_block = ((1 + k) * k) // 2
+        sz = z.size(0)
+        noise_start = [int((((k + (k - i + 1)) * i) / 2) * sz / total_block) for i in range(k)]
+        noise_end = [int((((k + (k - i)) * (i + 1)) / 2) * sz / total_block) for i in range(k)]
+        generated = [G(z[start:end]) for G, start, end in zip(Gs, noise_start, noise_end)]
+        generated = torch.cat(generated, dim=0)
+        return generated
+
+    def _eval_D():
+        """Do evaluation using D."""
+        testloader = data.DataLoader(trainset, batch_size=batch_size, shuffle=False)
+        with torch.no_grad():
+            values = torch.cat([D(x.cuda()).cpu() for x, _ in testloader], dim=0)
+        return values.view(-1)
+
+    def _collect_D_stats():
+        """Get the quantile of p-value from output values of D."""
+        D.eval()
+        values = _eval_D()
+        pvalue = pd.DataFrame(values.numpy())
+        stats = [float(pvalue.quantile(i/no_G)) for i in range(no_G)]
+        D.train()
+        return stats
+
+    criterion = nn.BCEWithLogitsLoss().cuda()
+    D.train()
+    global_steps = 0
+    for e in range(D_epochs):
+        for G in Gs:
+            G.train()
+        trainloader = data.DataLoader(trainset, batch_size=batch_size, shuffle=True, drop_last=True)
+        for it, (x_, _) in enumerate(trainloader):
+
+            # update D
+            x_ = x_.cuda()
+            z_ = prior_generator(batch_size, zdim).cuda()
+            D_optimizer.zero_grad()
+            D_real = D(x_)
+            D_real_loss = criterion(D_real, y_real_)
+            G_ = _generate(z_)
+            D_fake = D(G_)
+            D_fake_loss = criterion(D_fake, y_fake_)
+            # -y_i*log(D(x_i)) + -(1-y_i)*log(1-D(G(z_i))).
+            D_loss = D_real_loss + D_fake_loss
+            if writer is not None:
+                writer.add_scalar('D_loss', D_loss.item(), global_steps)
+            D_loss.backward()
+            D_optimizer.step()
+
+            # Get global statistics
+            # TODO(leoyolo): is this necessary? Should we update for each epoch?
+            stats = _collect_D_stats()
+
+            # update Gs
+            # resample z_ as in original MO-GAAL
+            z_ = prior_generator(batch_size, zdim).cuda()
+            g_loss_avg = 0.
+            if e < joint_epochs:
+                Gs_optimizer.zero_grad()
+                for i, G in enumerate(Gs):
+                    G_ = G(z_)
+                    target = torch.empty_like(y_fake_).fill_(stats[i])
+                    D_fake = D(G_)
+                    # -t_i*log(D(G(z_i))) - (1-t_i)log(1-D(G(z_i))).
+                    G_loss = criterion(D_fake, target)
+                    if writer is not None:
+                        writer.add_scalar(f'G_loss_{i}', G_loss.item(), global_steps)
+                    g_loss_avg += G_loss.item()
+                    G_loss.backward()
+                Gs_optimizer.step()
+
+                if (global_steps + 1) % 100 == 0:
+                    print("Epoch: [%2d] [%4d/%4d] D_loss: %.8f, G_loss_avg: %.8f" %
+                          ((e + 1), (it + 1), len(trainset) // batch_size, D_loss.item(), g_loss_avg/no_G))
+
+                # log image (while Gs are still updating)
+                if (global_steps + 1) % 500 == 0:
+                    for G in Gs:
+                        G.eval()
+                    generated = _generate(sample_z_)
+                    os.makedirs(os.path.join(RESULTS_DIR, dataset_name, 'generated'), exist_ok=True)
+                    img_path = os.path.join(RESULTS_DIR, dataset_name, 'generated',
+                                            '{}-{}.png'.format(
+                                                get_class_name_from_index(single_class_ind, dataset_name),
+                                                global_steps + 1))
+                    tu.save_image(generated, img_path, nrow=int(np.sqrt(generated.size(0))), normalize=True,
+                                  range=(-1, 1))
+                    if writer is not None:
+                        grid = tu.make_grid(generated, nrow=int(np.sqrt(generated.size(0))),
+                                            normalize=True, range=(-1, 1))
+                        writer.add_image(
+                            '{}-{}'.format(dataset_name, get_class_name_from_index(single_class_ind, dataset_name)),
+                            grid,
+                            global_steps
+                        )
+                    for G in Gs:
+                        G.train()
+            else:
+                for G in Gs:
+                    G.eval()
+            global_steps += 1
+        # update evary epoch
+        D_scheduler.step()
+        Gs_scheduler.step()
+
+    D.eval()
+    scores = _eval_D().sigmoid().numpy()
+    res_file_name = '{}_mo-gaal-{}_final_{}_{}.npz'.format(
+        dataset_name, p, get_class_name_from_index(single_class_ind, dataset_name),
+        datetime.now().strftime('%Y-%m-%d-%H%M')
+    )
+    res_file_path = os.path.join(RESULTS_DIR, dataset_name, res_file_name)
+    save_roc_pr_curve_data(scores, y_train, res_file_path)
+
+    if writer is not None:
+        writer.close()
+    gpu_q.put(gpu_to_use)
+
+
+def _dsebm_experiment(x_train, y_train, dataset_name, single_class_ind, gpu_q, p):
+    gpu_to_use = gpu_q.get()
+    # os.environ["CUDA_VISIBLE_DEVICES"] = gpu_to_use
+
+    n_channels = x_train.shape[get_channels_axis()]
+    input_side = x_train.shape[2]  # image side will always be at shape[2]
+    encoder_mdl = conv_encoder(input_side, n_channels, representation_activation='relu')
+    energy_mdl = dsebm.create_energy_model(encoder_mdl)
+    reconstruction_mdl = dsebm.create_reconstruction_model(energy_mdl)
+
+    # optimization parameters
+    batch_size = 128
+    epochs = 250
+    if dataset_name in ['mnist', 'fashion-mnist']:
+        optimizer = keras.optimizers.SGD(lr=0.001, momentum=0.9)
+    else:
+        optimizer = keras.optimizers.Adam()  # default config
+    reconstruction_mdl.compile(optimizer, 'mse')
+    x_train_task = x_train
+    x_test_task = x_train  # This is just for visual monitoring
+    reconstruction_mdl.fit(x=x_train_task, y=x_train_task,
+                           batch_size=batch_size,
+                           epochs=epochs,
+                           validation_data=(x_test_task, x_test_task))
+
+    scores = -energy_mdl.predict(x_train, batch_size)
+    labels = y_train
+    res_file_name = '{}_dsebm-outlier-{}_final_{}_{}.npz'.format(dataset_name, p,
+                                                get_class_name_from_index(single_class_ind, dataset_name),
+                                                datetime.now().strftime('%Y-%m-%d-%H%M'))
+    res_file_path = os.path.join(RESULTS_DIR, dataset_name, res_file_name)
+    save_roc_pr_curve_data(scores, labels, res_file_path)
+
+    gpu_q.put(gpu_to_use)
 
 # ############################### Interface to run all experiments ###################################################
 
