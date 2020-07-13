@@ -219,3 +219,38 @@ def get_scores(outputs, targets):
     for i in range(outputs.shape[0]):
         scores.append(outputs[i, targets[i]])
     return np.array(scores)
+
+class trainset_weights_pytorch(data.Dataset):
+    def __init__(self, train_data, train_labels, weights=None, transform=None, target_transform=None):
+        self.transform = transform
+        self.target_transform = target_transform
+
+        self.train_data = train_data  # ndarray
+        self.train_labels = train_labels
+        self.weights = weights
+
+    def __getitem__(self, index):
+        """
+        Args:
+            index (int): Index
+
+        Returns:
+            tuple: (image, target) where target is index of the target class.
+        """
+        img, target, weight = self.train_data[index], self.train_labels[index], self.weights[index]
+
+        # doing this so that it is consistent with all other datasets
+        # to return a PIL Image
+
+        # img = Image.fromarray(img)  # used if the img is [H, W, C] and the dtype is uint8
+
+        if self.transform is not None:
+            img = self.transform(img)
+
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return img, target, weight
+
+    def __len__(self):
+        return len(self.train_data)
