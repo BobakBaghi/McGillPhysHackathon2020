@@ -1,3 +1,34 @@
+# Self-supervised Deep Outlier Removal with Network Uncertainty and Score Refinement
+
+By Siqi  Wang,  Yijie  Zeng,  Xinwang  Liu,  Sihang  Zhou,  En  Zhu,  Marius  Kloft,  Jianping  Yin,  Qing Liao.  Sumbitted to IEEE Transactions on Pattern Analysis and Machine Intelligence (TPAMI).
+
+## Introduction
+
+This repository provides a substantially improved version of the E3Outlier framework.  The codes are used to reproduce results reported in our manuscript submitted to TPAMI, which extends our original publication in NeurIPS 2019.  Some improvements are summarized as below:
+- Multiple score refinement strategies (enseble, re-weighting) for E3Outlier are added. The refinements provide up to 2.1% AUROC gain on all benchmarks.  Check `outlier_experiments.py` for the implementations.
+- Several recently published unsupervised outlier detection methods are added for comparisons, including DSEBM, RSRAE/RSRAE+, MO-GAAL.  Check `outlier_experiments.py` for the implementations.
+- A script demonstrating the effect of uncertainty for a regression network can be found in `scripts/demo_uncertainty.py`.
+
+The requirements and usages for this improved version are the same as the original E3Outlier implementation.  In specific, all the results of E3Outlier and other UOD methods can be obtained by running
+
+```bash
+python outlier_experiments.py
+``` 
+
+If you use this branch of E3Outlier for your research, please cite the following besides our original publication:
+
+```
+@article{wang_e3outlier_2020,
+  title = {Self-supervised Deep Outlier Removal with Network Uncertainty and Score Refinement},
+  journal = {IEEE Transactions on Pattern Analysis and Machine Intelligence},
+  author = {Wang, Siqi and Zeng, Yijie and Liu, Xinwang and Zhou, Sihang and Zhu, En and Kloft, Marius and Yin, Jianping and Liao, Qing},
+  year = {2020},
+  pubstate = {Under review},
+}
+```
+
+-----
+
 # Effective End-to-end Unsupervised Outlier Detection via Inlier Priority of Discriminative Network
 By Siqi Wang, Yijie Zeng, Xinwang Liu, En Zhu, Jianping Yin, Chuanfu Xu, Marius Kloft.  In [NeurIPS 2019](https://papers.nips.cc/paper/8830-effective-end-to-end-unsupervised-outlier-detection-via-inlier-priority-of-discriminative-network).
 
