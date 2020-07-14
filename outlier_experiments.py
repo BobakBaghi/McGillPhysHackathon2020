@@ -16,7 +16,7 @@ from transformations import RA, RA_IA, RA_IA_PR
 from models.encoders_decoders import CAE_pytorch
 from models.drae_loss import DRAELossAutograd
 
-from models.wrn_pytorch import WideResNet
+from models.wrn_pytorch import WideResNet, WideResNet2
 from models.resnet_pytorch import ResNet
 from models.densenet_pytorch import DenseNet
 import torchvision.transforms as transforms
@@ -343,6 +343,46 @@ def train_robust_cae(x_train, model, criterion, optimizer, lmbda, inner_epochs, 
     losses = ((x_train-S-reconstruction) ** 2).sum(axis=(1, 2, 3), keepdims=False)
     return losses
 
+def enable_dropout(m):
+    for each_module in m.modules():
+        if __name__ == '__main__':
+            if each_module.__class__.__name__.startswith('Dropout'):
+                each_module.train()
+
+
+def test_mcdropout(testloader, model, mcNum):
+    model.eval()
+    model.apply(enable_dropout)
+    preds = []
+    for i in range(mcNum):
+        res = []
+        for batch_idx, (inputs) in enumerate(testloader):
+            inputs = torch.autograd.Variable(inputs.cuda())
+            outputs, _ = model(inputs)
+            res.append(softmax(outputs.data.cpu()))
+        preds.append(np.concatenate(res, axis=0))
+    preds = np.array(preds)
+    meanPreds = np.mean(preds, axis=0)
+    varPreds = np.mean(np.var(preds, axis=0), axis=1)
+    return meanPreds, varPreds
+
+def test_mcdropout_new(testloader, model, mcNum):
+    model.eval()
+    model.apply(enable_dropout)
+    preds = []
+    for i in range(mcNum):
+        res = []
+        for batch_idx, (inputs) in enumerate(testloader):
+            inputs = torch.autograd.Variable(inputs.cuda())
+            outputs, _ = model(inputs)
+            res.append(softmax(outputs.data.cpu()))
+        preds.append(np.concatenate(res, axis=0))
+    preds = np.array(preds)
+    # meanPreds = np.mean(preds, axis=0)
+    maxPreds = np.max(preds, axis=-1)
+    meanPreds = np.mean(maxPreds, axis=0)
+    varPreds = np.std(maxPreds, axis=0)
+    return meanPreds, varPreds
 
 # ######################### functions to perform different deep outlier detection methods ############################
 
@@ -1426,6 +1466,184 @@ def _iterated_weighted_transformations_pytorch_experiment(x_train, y_train, data
     gpu_q.put(gpu_to_use)
 
 
+def _mcdropout_transformations_pytorch_experiment(x_train, y_train, dataset_name, single_class_ind, gpu_q, p):
+    gpu_to_use = gpu_q.get()
+    np.random.seed(0)
+    torch.manual_seed(0)
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = True
+
+    n_channels = x_train.shape[get_channels_axis()]
+    if OP_TYPE == 'RA':
+        transformer = RA(8, 8)
+    elif OP_TYPE == 'RA+IA':
+        transformer = RA_IA(8, 8, 12)
+    elif OP_TYPE == 'RA+IA+PR':
+        transformer = RA_IA_PR(8, 8, 12, 23, 2)
+    else:
+        raise NotImplementedError
+    print(transformer.n_transforms)
+    n, k = (10, 4)
+
+    # parameters for training
+    cudnn.benchmark = True
+    criterion = nn.CrossEntropyLoss()
+    dropRate = 0.05
+    model = WideResNet2(num_classes=transformer.n_transforms, depth=n, widen_factor=k, in_channel=n_channels, dropRate=dropRate)
+
+    model = torch.nn.DataParallel(model).cuda()
+    if dataset_name == 'fashion-mnist' or dataset_name == 'mnist':
+        print('SGD')
+        optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9, weight_decay=0.0005)
+    else:
+        print('ADAM')
+        optimizer = optim.Adam(model.parameters(), eps=1e-7, weight_decay=0.0005)
+    epochs = int(np.ceil(250 / transformer.n_transforms))
+
+    # real data
+    x_train_task = x_train
+    transformations_inds = np.tile(np.arange(transformer.n_transforms), len(x_train_task))
+    x_train_task_transformed = transformer.transform_batch(np.repeat(x_train_task, transformer.n_transforms, axis=0),
+                                                           transformations_inds)
+    trainset = trainset_pytorch(train_data=x_train_task_transformed, train_labels=transformations_inds,
+                                transform=transform_train)
+    batch_size = 128
+    trainloader = data.DataLoader(trainset, batch_size=batch_size, shuffle=True)
+
+    train_pytorch(trainloader, model, criterion, optimizer, epochs)
+
+    score_mode = 'max_mean'  # report max mean score as baseline
+    # output scores
+    if score_mode is 'pl_mean':
+        preds = np.zeros((len(x_train_task), transformer.n_transforms))
+        original_preds = np.zeros((transformer.n_transforms, len(x_train_task), transformer.n_transforms))
+        for t in range(transformer.n_transforms):
+            idx = np.squeeze(np.array([range(x_train_task.shape[0])]) * transformer.n_transforms + t)
+            test_set = testset_pytorch(test_data=x_train_task_transformed[idx, :],
+                                       transform=transform_test)
+            original_preds[t, :, :] = softmax(test_pytorch(testloader=data.DataLoader(test_set, batch_size=1024, shuffle=False), model=model))
+            preds[:, t] = original_preds[t, :, :][:, t]
+        scores = preds.mean(axis=-1)
+    elif score_mode is 'max_mean':
+        preds = np.zeros((len(x_train_task), transformer.n_transforms))
+        original_preds = np.zeros((transformer.n_transforms, len(x_train_task), transformer.n_transforms))
+        for t in range(transformer.n_transforms):
+            idx = np.squeeze(np.array([range(x_train_task.shape[0])]) * transformer.n_transforms + t)
+            test_set = testset_pytorch(test_data=x_train_task_transformed[idx, :],
+                                       transform=transform_test)
+            original_preds[t, :, :] = softmax(test_pytorch(testloader=data.DataLoader(test_set, batch_size=1024, shuffle=False), model=model))
+            preds[:, t] = np.max(original_preds[t, :, :], axis=1)
+        scores = preds.mean(axis=-1)
+    elif score_mode is 'neg_entropy':
+        preds = np.zeros((len(x_train_task), transformer.n_transforms))
+        original_preds = np.zeros((transformer.n_transforms, len(x_train_task), transformer.n_transforms))
+        for t in range(transformer.n_transforms):
+            idx = np.squeeze(np.array([range(x_train_task.shape[0])]) * transformer.n_transforms + t)
+            test_set = testset_pytorch(test_data=x_train_task_transformed[idx, :],
+                                       transform=transform_test)
+            original_preds[t, :, :] = softmax(test_pytorch(testloader=data.DataLoader(test_set, batch_size=1024, shuffle=False), model=model))
+            for s in range(len(x_train_task)):
+                preds[s, t] = neg_entropy(original_preds[t, s, :])
+        scores = preds.mean(axis=-1)
+    else:
+        raise NotImplementedError
+
+    res_file_name = '{}_transformations-{}-outlier-{}-epoch-{}-mode-{}_mcBaseline_{}_{}.npz'.format(dataset_name, OP_TYPE, p, epochs, score_mode,
+                                                               get_class_name_from_index(single_class_ind, dataset_name),
+                                                               datetime.now().strftime('%Y-%m-%d-%H%M'))
+    res_file_path = os.path.join(RESULTS_DIR, dataset_name, res_file_name)
+    os.makedirs(os.path.join(RESULTS_DIR, dataset_name), exist_ok=True)
+    save_roc_pr_curve_data(scores, y_train, res_file_path)
+
+    # mcDropout
+    mcNum = 5
+    score_mode = 'mcd_max'
+    varScores = np.zeros((len(x_train), ))
+    meanScores = np.zeros((len(x_train), ))
+    # output scores
+    if score_mode is 'pl_mean':
+        preds = np.zeros((len(x_train_task), transformer.n_transforms))
+        original_preds = np.zeros((transformer.n_transforms, len(x_train_task), transformer.n_transforms))
+        for t in range(transformer.n_transforms):
+            idx = np.squeeze(np.array([range(x_train_task.shape[0])]) * transformer.n_transforms + t)
+            test_set = testset_pytorch(test_data=x_train_task_transformed[idx, :],
+                                       transform=transform_test)
+            original_preds[t, :, :] = softmax(
+                test_pytorch(testloader=data.DataLoader(test_set, batch_size=1024, shuffle=False), model=model))
+            preds[:, t] = original_preds[t, :, :][:, t]
+        scores = preds.mean(axis=-1)
+    elif score_mode is 'max_mean':
+        preds = np.zeros((len(x_train_task), transformer.n_transforms))
+        original_preds = np.zeros((transformer.n_transforms, len(x_train_task), transformer.n_transforms))
+        for t in range(transformer.n_transforms):
+            idx = np.squeeze(np.array([range(x_train_task.shape[0])]) * transformer.n_transforms + t)
+            test_set = testset_pytorch(test_data=x_train_task_transformed[idx, :],
+                                       transform=transform_test)
+            original_preds[t, :, :] = softmax(
+                test_pytorch(testloader=data.DataLoader(test_set, batch_size=1024, shuffle=False), model=model))
+            preds[:, t] = np.max(original_preds[t, :, :], axis=1)
+        scores = preds.mean(axis=-1)
+    elif score_mode is 'neg_entropy':
+        preds = np.zeros((len(x_train_task), transformer.n_transforms))
+        original_preds = np.zeros((transformer.n_transforms, len(x_train_task), transformer.n_transforms))
+        for t in range(transformer.n_transforms):
+            idx = np.squeeze(np.array([range(x_train_task.shape[0])]) * transformer.n_transforms + t)
+            test_set = testset_pytorch(test_data=x_train_task_transformed[idx, :], transform=transform_test)
+
+            original_preds[t, :, :], curVarScores = test_mcdropout(
+                testloader=data.DataLoader(test_set, batch_size=1024, shuffle=False), model=model, mcNum=mcNum)
+            varScores += curVarScores
+            for s in range(len(x_train_task)):
+                preds[s, t] = neg_entropy(original_preds[t, s, :])
+        scores = preds.mean(axis=-1)
+        varScores /= transformer.n_transforms
+        varScores *= -1.
+    elif score_mode is 'mcd_max':
+        for t in range(transformer.n_transforms):
+            idx = np.squeeze(np.array([range(x_train_task.shape[0])]) * transformer.n_transforms + t)
+            test_set = testset_pytorch(test_data=x_train_task_transformed[idx, :], transform=transform_test)
+
+            curMeanScores, curVarScores = test_mcdropout_new(
+                testloader=data.DataLoader(test_set, batch_size=1024, shuffle=False), model=model, mcNum=mcNum)
+            varScores += curVarScores
+            meanScores += curMeanScores
+        varScores /= transformer.n_transforms
+        meanScores /= transformer.n_transforms
+        varScores *= -1.
+        scores = meanScores + varScores
+    else:
+        raise NotImplementedError
+
+    res_file_name = '{}_transformations-{}-outlier-{}-epoch-{}-dropRate-{}-mcDropout-{}_{}_{}.npz'.format(dataset_name,
+                                                                                                    OP_TYPE, p,
+                                                                                                    epochs, dropRate, mcNum,
+                                                                                                    get_class_name_from_index(
+                                                                                                        single_class_ind,
+                                                                                                        dataset_name),
+                                                                                                    datetime.now().strftime(
+                                                                                                        '%Y-%m-%d-%H%M'))
+    res_file_path = os.path.join(RESULTS_DIR, dataset_name, res_file_name)
+    os.makedirs(os.path.join(RESULTS_DIR, dataset_name), exist_ok=True)
+    save_roc_pr_curve_data(scores, y_train, res_file_path)
+
+    res_file_name = '{}_transformations-{}-outlier-{}-epoch-{}-dropRate-{}-mcDropout_mean-{}_{}_{}.npz'.format(dataset_name,
+                                                                                                          OP_TYPE,
+                                                                                                          p,
+                                                                                                          epochs,
+                                                                                                          dropRate,
+                                                                                                          mcNum,
+                                                                                                          get_class_name_from_index(
+                                                                                                              single_class_ind,
+                                                                                                              dataset_name),
+                                                                                                          datetime.now().strftime(
+                                                                                                              '%Y-%m-%d-%H%M'))
+    res_file_path = os.path.join(RESULTS_DIR, dataset_name, res_file_name)
+    os.makedirs(os.path.join(RESULTS_DIR, dataset_name), exist_ok=True)
+    save_roc_pr_curve_data(meanScores, y_train, res_file_path)
+
+    gpu_q.put(gpu_to_use)
+
+
 def _mo_gaal_experiment(x_train, y_train, dataset_name, single_class_ind, gpu_q, p):
     gpu_to_use = gpu_q.get()
 
@@ -1721,6 +1939,9 @@ def run_experiments(load_dataset_fn, dataset_name, q, n_classes, abnormal_fracti
         # SSD-IF / E3Outlier
         _E3Outlier_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
+        # Mc-Dropout
+        _mcdropout_transformations_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
+
         # Ensemble as score refinement strategy
         _ensemble_transformations_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
@@ -1730,7 +1951,7 @@ def run_experiments(load_dataset_fn, dataset_name, q, n_classes, abnormal_fracti
         # Online re-weighting as score refinement
         _iterated_weighted_transformations_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
-        # Re-weighting + ensemble as score refinement
+        # All score refinement strategies (re-weighting + ensemble)
         _rew_ens_transformations_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
         # DRAE
