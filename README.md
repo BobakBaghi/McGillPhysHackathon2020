@@ -1,3 +1,6 @@
+# McGill Physics Hackathon 
+This the LYF HAKS submission to the McGill 2020 physics hackathon. This repository was cloned and the information can be found below. All credit for the previous fork goes to the original authors. This repo was just modified to work with astronomical data.
+
 # Self-supervised Deep Outlier Removal with Network Uncertainty and Score Refinement
 
 By Siqi  Wang,  Yijie  Zeng,  Xinwang  Liu,  Sihang  Zhou,  En  Zhu,  Marius  Kloft,  Jianping  Yin,  Qing Liao.  Sumbitted to IEEE Transactions on Pattern Analysis and Machine Intelligence (TPAMI).
