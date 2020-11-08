@@ -3,7 +3,7 @@ import numpy as np
 import torch
 import torch.utils.data
 from utils import (
-    load_cifar10, load_cifar100, load_mnist, load_fashion_mnist, load_svhn
+    load_cifar10, load_cifar100, load_mnist, load_fashion_mnist, load_svhn, load_g10
 )
 
 
@@ -47,6 +47,9 @@ def load_cifar100_with_outliers(class_ind, p):
 
 def load_mnist_with_outliers(class_ind, p):
     return _load_data_one_vs_all(load_mnist, class_ind, p)
+
+def load_g10_with_outliers(class_ind, p):
+    return _load_data_one_vs_all(load_g10, class_ind, p)
 
 
 def load_fashion_mnist_with_outliers(class_ind, p):

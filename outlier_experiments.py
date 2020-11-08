@@ -10,7 +10,7 @@ from keras.layers import Dense, Dropout
 from utils import save_roc_pr_curve_data, get_class_name_from_index, get_channels_axis
 from models.encoders_decoders import conv_encoder, conv_decoder, RSRAE, RSRAE_plus, RSR1Loss, RSR2Loss, L21Loss
 from outlier_datasets import load_cifar10_with_outliers, load_cifar100_with_outliers, \
-    load_fashion_mnist_with_outliers, load_mnist_with_outliers, load_svhn_with_outliers
+    load_fashion_mnist_with_outliers, load_mnist_with_outliers, load_svhn_with_outliers, load_g10_with_outliers
 from models import dagmm, dsebm
 from transformations import RA, RA_IA, RA_IA_PR
 from models.encoders_decoders import CAE_pytorch
@@ -490,7 +490,8 @@ def _E3Outlier_experiment(x_train, y_train, dataset_name, single_class_ind, gpu_
 
     # parameters for training
     trainset = trainset_pytorch(train_data=x_train_task_transformed, train_labels=transformations_inds, transform=transform_train)
-    batch_size = 128
+    # batch_size = 128
+    batch_size = 64
     trainloader = data.DataLoader(trainset, batch_size=batch_size, shuffle=True)
     cudnn.benchmark = True
     criterion = nn.CrossEntropyLoss()
@@ -499,22 +500,23 @@ def _E3Outlier_experiment(x_train, y_train, dataset_name, single_class_ind, gpu_
         optimizer = optim.SGD(model.parameters(), lr=0.001, momentum=0.9, weight_decay=0.0005)
     else:
         optimizer = optim.Adam(model.parameters(), eps=1e-7, weight_decay=0.0005)
-    epochs = int(np.ceil(250 / transformer.n_transforms))
+    # epochs = int(np.ceil(250 / transformer.n_transforms))
+    epochs = int(np.ceil(750 / transformer.n_transforms))
     train_pytorch(trainloader, model, criterion, optimizer, epochs)
 
     # SSD-IF
-    test_set = testset_pytorch(test_data=x_train_task, transform=transform_test)
-    x_train_task_rep = get_features_pytorch(
-        testloader=data.DataLoader(test_set, batch_size=batch_size, shuffle=False), model=model
-    ).numpy()
-    clf = IsolationForest(contamination=p, n_jobs=4).fit(x_train_task_rep)
-    if_scores = clf.decision_function(x_train_task_rep)
-    res_file_name = '{}_ssd-iforest-{}_{}_{}.npz'.format(dataset_name, p,
-                                                       get_class_name_from_index(single_class_ind, dataset_name),
-                                                       datetime.now().strftime('%Y-%m-%d-%H%M'))
-    res_file_path = os.path.join(RESULTS_DIR, dataset_name, res_file_name)
-    os.makedirs(os.path.join(RESULTS_DIR, dataset_name), exist_ok=True)
-    save_roc_pr_curve_data(if_scores, y_train, res_file_path)
+    # test_set = testset_pytorch(test_data=x_train_task, transform=transform_test)
+    # x_train_task_rep = get_features_pytorch(
+    #     testloader=data.DataLoader(test_set, batch_size=batch_size, shuffle=False), model=model
+    # ).numpy()
+    # clf = IsolationForest(contamination=p, n_jobs=4).fit(x_train_task_rep)
+    # if_scores = clf.decision_function(x_train_task_rep)
+    # res_file_name = '{}_ssd-iforest-{}_{}_{}.npz'.format(dataset_name, p,
+    #                                                    get_class_name_from_index(single_class_ind, dataset_name),
+    #                                                    datetime.now().strftime('%Y-%m-%d-%H%M'))
+    # res_file_path = os.path.join(RESULTS_DIR, dataset_name, res_file_name)
+    # os.makedirs(os.path.join(RESULTS_DIR, dataset_name), exist_ok=True)
+    # save_roc_pr_curve_data(if_scores, y_train, res_file_path)
 
     # E3Outlier
     if SCORE_MODE == 'pl_mean':
@@ -558,6 +560,7 @@ def _E3Outlier_experiment(x_train, y_train, dataset_name, single_class_ind, gpu_
     os.makedirs(os.path.join(RESULTS_DIR, dataset_name), exist_ok=True)
     save_roc_pr_curve_data(scores, y_train, res_file_path)
 
+    import pdb; pdb.set_trace()
     gpu_q.put(gpu_to_use)
 
 
@@ -1939,49 +1942,49 @@ def run_experiments(load_dataset_fn, dataset_name, q, n_classes, abnormal_fracti
         # SSD-IF / E3Outlier
         _E3Outlier_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
-        # Mc-Dropout
-        _mcdropout_transformations_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
+        # # Mc-Dropout
+        # _mcdropout_transformations_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
-        # Ensemble as score refinement strategy
-        _ensemble_transformations_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
+        # # Ensemble as score refinement strategy
+        # _ensemble_transformations_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
-        # Reboot re-weighting as score refinement
-        _weighted_transformations_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
+        # # Reboot re-weighting as score refinement
+        # _weighted_transformations_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
-        # Online re-weighting as score refinement
-        _iterated_weighted_transformations_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
+        # # Online re-weighting as score refinement
+        # _iterated_weighted_transformations_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
-        # All score refinement strategies (re-weighting + ensemble)
-        _rew_ens_transformations_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
+        # # All score refinement strategies (re-weighting + ensemble)
+        # _rew_ens_transformations_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
-        # DRAE
-        _DRAE_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
+        # # DRAE
+        # _DRAE_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
-        # RDAE
-        _RDAE_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
+        # # RDAE
+        # _RDAE_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
-        # CAE / CAE-IF
-        _cae_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
+        # # CAE / CAE-IF
+        # _cae_pytorch_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
-        # DAGMM
-        _dagmm_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
+        # # DAGMM
+        # _dagmm_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
-        # DSEBM
-        _dsebm_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
+        # # DSEBM
+        # _dsebm_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
-        # mo-gaal
-        _mo_gaal_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
+        # # mo-gaal
+        # _mo_gaal_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
-        # RSRAE
-        _rsrae_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
+        # # RSRAE
+        # _rsrae_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
-        # RSRAE+
-        _rsrae_plus_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
+        # # RSRAE+
+        # _rsrae_plus_experiment(x_train, y_train, dataset_name, c, q, abnormal_fraction)
 
 
 if __name__ == '__main__':
 
-    n_run = 5
+    n_run = 1
     N_GPUS = 1  # deprecated, use one gpu only
     man = Manager()
     q = man.Queue(N_GPUS)
@@ -1989,14 +1992,16 @@ if __name__ == '__main__':
         q.put(str(g))
 
     experiments_list = [
-        (load_mnist_with_outliers, 'mnist', 10),
-        (load_fashion_mnist_with_outliers, 'fashion-mnist', 10),
-        (load_cifar10_with_outliers, 'cifar10', 10),
-        (load_cifar100_with_outliers, 'cifar100', 20),
-        (load_svhn_with_outliers, 'svhn', 10),
+        (load_g10_with_outliers, 'g10', 1),
+        # (load_mnist_with_outliers, 'mnist', 10),
+        # (load_fashion_mnist_with_outliers, 'fashion-mnist', 10),
+        # (load_cifar10_with_outliers, 'cifar10', 10),
+        # (load_cifar100_with_outliers, 'cifar100', 20),
+        # (load_svhn_with_outliers, 'svhn', 10),
     ]
 
-    p_list = [0.05, 0.1, 0.15, 0.2, 0.25]
+    # p_list = [0.05, 0.1, 0.15, 0.2, 0.25]
+    p_list = [0.05]
     for i in range(n_run):
         for data_load_fn, dataset_name, n_classes in experiments_list:
             for p in p_list:

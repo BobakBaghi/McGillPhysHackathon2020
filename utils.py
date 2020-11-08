@@ -7,6 +7,8 @@ from keras.datasets import mnist, fashion_mnist, cifar100, cifar10
 from keras.backend import cast_to_floatx
 from torchvision.datasets import SVHN
 
+from astroNN.datasets import galaxy10
+
 
 def resize_and_crop_image(input_file, output_side_length, greyscale=False):
     img = cv2.imread(input_file)
@@ -62,7 +64,20 @@ def load_cifar10():
     (X_train, y_train), (X_test, y_test) = cifar10.load_data()
     X_train = normalize_minus1_1(cast_to_floatx(X_train))
     X_test = normalize_minus1_1(cast_to_floatx(X_test))
-    return (X_train, y_train), (X_test, y_test)
+    return (X_train[:1000], y_train[:1000]), (X_test[:1000], y_test[:1000])
+
+def load_g10():
+    X_train, y_train = galaxy10.load_data()
+
+    actual_X_train = np.zeros((X_train.shape[0], X_train.shape[1]+1, X_train.shape[2]+1, X_train.shape[3]))
+
+    for idx, image in enumerate(X_train):
+        padded = np.pad(image,1,mode='edge')
+        actual_X_train[idx] = padded[1:,1:,1:-1]
+
+    X_train = normalize_minus1_1(cast_to_floatx(actual_X_train))
+    # X_test = normalize_minus1_1(cast_to_floatx(X_test))
+    return (X_train[:1000], y_train[:1000]), (X_train[:1000],y_train[:1000])
 
 
 def load_cifar100(label_mode='coarse'):
@@ -154,7 +169,8 @@ def get_class_name_from_index(index, dataset_name):
                           'ankle-boot'),
         'cats-vs-dogs': ('cat', 'dog'),
         'mnist':('0', '1', '2', '3', '4', '5', '6', '7', '8', '9'),
-        'svhn':('0', '1', '2', '3', '4', '5', '6', '7', '8', '9')
+        'svhn':('0', '1', '2', '3', '4', '5', '6', '7', '8', '9'),
+        'g10':('0', '1', '2', '3', '4', '5', '6', '7', '8', '9'),
     }
 
     return ind_to_name[dataset_name][index]

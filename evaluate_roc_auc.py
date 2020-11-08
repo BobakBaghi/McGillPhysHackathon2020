@@ -53,7 +53,7 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     n_classes = {
-        'cifar10': 10, 'mnist': 10, 'cifar100': 20, 'fashion-mnist': 10, 'svhn': 10,
+        'cifar10': 10, 'mnist': 10, 'cifar100': 20, 'fashion-mnist': 10, 'svhn': 10, 'g10': 1
     }[args.dataset]
     compute_average_roc_auc(args.algo_name, args.results_dir, args.dataset,
                             n_classes)
